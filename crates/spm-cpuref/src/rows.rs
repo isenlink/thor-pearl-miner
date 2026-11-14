@@ -128,7 +128,7 @@ pub fn tile_from_rows(
 }
 
 /// Relaxed-fold-granularity variant of [`tile_from_rows`]: fold once per `fold_every` slices
-/// (the SPM_FOLD_EVERY=N PoW proposal, see pearl-umma-miner PROTOCOL-FOLD-GATE.md). The fold
+/// (the SPM_FOLD_EVERY=N PoW proposal, see docs/GEN5-DESIGN.md). The fold
 /// input stays the CUMULATIVE acc (pool invariant); the transcript slot becomes
 /// `(s / fold_every) % TRANSCRIPT_WORDS`; the final partial group still folds.
 /// `fold_every = 1` reproduces the current pool semantics bit-exactly.

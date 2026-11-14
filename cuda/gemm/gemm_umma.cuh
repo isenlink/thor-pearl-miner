@@ -1,8 +1,8 @@
 // GEN5 UMMA mining kernel (5th generation, pool semantics, sm_110a 2SM UMMA i8), selected by
-// GEN5_MINE=1. Ported from the standalone pearl-umma-miner/gen5_miner.cu (101.05 T-MAC/s measured
-// on the Thor GB10 at 16384^2 x 4096, bit-exact VERIFY + fold-oracle double PASS, 2026-11-12).
+// GEN5_MINE=1. Ported from a standalone UMMA bench (101.05 T-MAC/s measured
+// on a DRIVE Thor board at 16384^2 x 4096, bit-exact VERIFY + fold-oracle double PASS).
 //
-// Architecture (full story in pearl-umma-miner GEN5-PORT-20261111.md):
+// Architecture (full story in docs/GEN5-DESIGN.md):
 //   * CUTLASS SM100 2SM UMMA i8 mainloop (256x256x128 cluster tile, 2x1 cluster, 5 stages,
 //     TMA pipeline) + TMEM double-buffered per-slice deltas + 8 epilogue warps accumulating into
 //     registers (128 i32 per thread).
@@ -137,7 +137,7 @@ struct SharedStorage5 {
 #endif
   uint32_t t_circ[256 * 17];     // per-thread transcript circular slots (stride 17: banks)
 #ifdef SPM_D3_RENDEZVOUS
-  // D3 (WEDGE-AUDIT §3, stock sm100_gemm_tma_warpspecialized L791-800 parity): cluster-level
+  // D3 (wedge audit, stock sm100_gemm_tma_warpspecialized parity): cluster-level
   // barrier so both CTAs' MMA warps rendezvous before either frees TMEM. init(32) = the local
   // MMA warp's 32 threads; the peer's remote arrive fills it.
   cutlass::arch::ClusterBarrier tmem_dealloc_bar;

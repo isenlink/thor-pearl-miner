@@ -1,0 +1,21 @@
+schema_version = 1
+
+[miner]
+# Replace with your own Pearl wallet address (prl1...)
+wallet = "prl1REPLACE_WITH_YOUR_WALLET_ADDRESS"
+# Worker name: any short identifier (shown on the pool)
+worker = "thor-worker"
+disclosure_accepted = true
+
+[[pools]]
+name = "kryptex"
+host = "prl-hk.kryptex.network"
+port = 8048
+tls = "auto"
+dialect = "kryptex-v2"
+
+[[pools]]
+name = "herominers"
+host = "br.pearl.herominers.com"
+port = 1200
+tls = "auto"

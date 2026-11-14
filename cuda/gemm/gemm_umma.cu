@@ -77,7 +77,7 @@ gemm_hash_umma_kernel(const __grid_constant__ Params5 p) {
     // tcgen05.alloc requires a single fully-active warp as the issuer.
     tmem_allocator.allocate(cute::TMEM::Sm100TmemCapacityColumns, &shared.tmem_base_ptr);
 #ifdef SPM_D2_SYNCWARP
-    __syncwarp();  // D2 (WEDGE-AUDIT §3, stock parity): post-alloc warp hygiene
+    __syncwarp();  // D2 (wedge audit, stock parity): post-alloc warp hygiene
 #endif
 #ifdef SPM_D3_RENDEZVOUS
     // D3: init the dealloc rendezvous barrier (32 = this CTA's MMA warp) before any use;

@@ -21,3 +21,9 @@
 
 # Release tarballs from packaging/make-release.sh
 /dist/
+
+# prebuilt binaries ship as GitHub Release assets, not in git
+deploy/spark-pearl-miner
+deploy/spark-pearl-gpu-worker
+deploy/cu13-backup/spark-pearl-miner
+deploy/cu13-backup/spark-pearl-gpu-worker

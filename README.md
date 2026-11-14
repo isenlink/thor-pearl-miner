@@ -1,224 +1,99 @@
-# Spark Pearl Miner
+# Thor Pearl Miner — GEN5 UMMA mining kernel for NVIDIA DRIVE Thor
 
-**Earn Pearl (PRL) with your NVIDIA DGX Spark while it would otherwise sit idle, at low power.**
-Open source (Apache-2.0), built only for the DGX Spark (GB10). Unofficial: not affiliated with,
-sponsored by, or endorsed by NVIDIA or Pearl Research Labs.
-_Português: [README.pt-BR.md](README.pt-BR.md)_
+**Run the [Spark Pearl Miner](https://github.com/xXGuilasXx/spark-pearl-miner) on NVIDIA DRIVE Thor (Tegra264, sm_110a / sm_101a) with a 5th-generation 2-SM UMMA INT8 kernel — 101 T-MAC/s measured, bit-exact against the pure-Rust reference.**
 
-> **Status:** mining on mainnet pools (Kryptex, HeroMiners BR, LuckyPool BR) with accepted shares ·
-> pre-release **0.1.0-alpha.3**.
+This repository is a fork of `xXGuilasXx/spark-pearl-miner` (base commit `6536563`) carrying the GEN5 port: a 2-SM UMMA (tcgen05) mining kernel for DRIVE Thor hardware, its wedge-prevention patches, a pure-Rust reference oracle, and a complete cross-compilation + deployment guide for DRIVE OS boards.
 
-## Why
+> **Unofficial project.** Not affiliated with, sponsored by, or endorsed by NVIDIA or Pearl Research Labs. Upstream is built for the DGX Spark (GB10); this fork adds the DRIVE Thor path.
 
-A DGX Spark spends most of its time waiting for the next job. This miner puts that idle GPU to work
-on Pearl (PRL), a proof-of-useful-work coin whose "hash" is an INT8 matrix multiplication, which is
-exactly what the GB10's tensor cores are good at.
+## Why DRIVE Thor
 
-On the DGX Spark, with the default 2000 MHz clock cap, it sustains **77.9 T-MAC/s** of credited work
-at **about 67 W of GPU power**, with the GPU at **72 °C**: well below the ~88–92 W at which the
-Spark is known to power off. The credited rate moves in steps because the pool credits whole
-attempts (7.04e13 MACs each).
+The upstream miner targets the DGX Spark's GB10 (`sm_121a`). DRIVE Thor (Tegra264) has a different tensor-core generation — the 5th-gen UMMA (tcgen05) instructions with 2-SM clusters — and a different CUDA stack (DRIVE OS ships CUDA 12.8 natively; CUDA 13.1 is available as a compat layer). The GEN5 kernel exploits exactly that hardware:
 
-What that earns depends on the network difficulty and the PRL price, which both move fast. At the
-**2026-09-26 snapshot** in [VIABILITY](docs/en/VIABILITY.md) (difficulty 29.4 M, 0.0241 PRL per
-TH/s per day, PRL at US$1.30), 77.9 T-MAC/s is about **1.8 PRL/day gross**, before the 2 %
-developer fee and the pool's own fee. Difficulty rose 36 % in the 30 days before that snapshot, so
-expect less over time. Your pool's website shows what you really earn. This is not financial
-advice.
+| Metric | Value | Conditions |
+|---|---|---|
+| **Credited mining rate** | **101.05 T-MAC/s** | cu13.1 compat stack, sm_110a, 256×256×128 tile, 2×1 cluster, s5 |
+| Alternative stack | 100.53 T-MAC/s | cu12.8 native, sm_101a (no compat layer needed) |
+| Bit-exactness | PASS | 512-tile known-answer test vs `spm-cpuref` oracle, both stacks |
+| Theoretical ceiling | ~120 T-MAC/s | 14 SM × 2.6 GHz × 4096 MAC/clk ≈ 149; MMA-unit measured limit 120.15 |
+| GPU power (mining) | ~60 W class | well below the board's thermal envelope |
 
-![The dashboard (simulated values)](docs/images/en/dashboard-mining.png)
-_The dashboard. Simulated values: the manual's pictures come from a simulated miner._
+The credited rate is what the pool pays for; it moves in steps because the pool credits whole attempts (7.04e13 MACs each). What that earns depends on network difficulty and the PRL price — check your pool's website. This is not financial advice.
 
-## Install
+## What's in this fork (vs upstream `6536563`)
 
-On the DGX Spark, in a terminal, as your normal user (not root):
+1. **`GEN5_MINE` kernel** — `cuda/gemm/gemm_umma.{cuh,cu}`: 2-SM UMMA INT8 GEMM with per-128-K-slice hash-tile transcript (XOR fold + rotl13), BLAKE3 digest, bound comparison — the full Pearl PoW fused in one kernel.
+2. **status-only abort** — in-kernel early-exit drain poisoned the CUDA context; abort is now status-only (documented deviation from the stock single-chunk ≤10 ms rule: worst-case cancel latency ≈ 2 chunks × 8 ms, acceptable on a dedicated board).
+3. **Adaptive chunk ceiling** — re-derived from the measured UMMA rate (100.5 T-MAC/s @ 1.53 GHz pinned) with a 30 % slowdown margin, instead of the gen4-calibrated clock-floor constant.
+4. **`SPM_STEP2_UNIQ`** — Step2 unique-slot fold, +7 % credited throughput (50.4 → 53.9 T-MAC/s credited), **default OFF**.
+5. **`SPM_D2_SYNCWARP` / `SPM_D3_RENDEZVOUS`** — wedge-prevention patches (warp synchronisation guard; cluster rendezvous before TMEM free), stock parity, **default OFF**.
+6. **cpuref oracle** — `tile_from_rows_fold_every` in `crates/spm-cpuref`: pure-Rust reference for the (frozen, not being pursued) `SPM_FOLD_EVERY=N` proposal. `cargo test -p spm-cpuref` passes (11 tests).
 
-**1. Install.** One command:
+**All experimental kernels are opt-in via preprocessor macros** injected through the standard `SPM_NVCC_FLAGS` build variable. A plain build produces exactly the upstream semantics. See the "Experimental GPU kernels" section of the README in the tree.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/xXGuilasXx/spark-pearl-miner/main/packaging/install.sh | bash
-```
+## Quick start (prebuilt binaries)
 
-The installer checks the machine (aarch64, GB10, NVIDIA driver ≥ 580, the CUDA 13 runtime),
-downloads the newest release and checks it against its `SHA256SUMS` (until the first release is
-published it builds from source instead, 5–15 minutes), installs `~/.local/bin/spark-pearl-miner`,
-a systemd user service and an app-menu entry, and starts the service. Before that it asks two
-questions, both answered **Yes** by pressing Enter, that need your password once (`sudo`):
-
-- **Install the 2000 MHz GPU clock cap?** Recommended: the safety net that keeps the GPU at about
-  63 W, far from the ~88–92 W at which the Spark powers off (reversible).
-- **Keep mining after you log out and start at boot?** (lingering)
-
-It never touches your settings, and a fresh install does not mine yet.
-
-**2. Open the GUI.** The installer opens it; otherwise use **Spark Pearl Miner** in the app menu, run
-`spark-pearl-miner gui`, or open **http://127.0.0.1:4078/**.
-
-**3. Three answers.** Pick your language, paste your Pearl wallet address (`prl1p…`), accept the
-2 % developer fee, and press **Start mining**.
-
-![Setup step 2: your wallet](docs/images/en/wizard-2-wallet.png)
-
-**If you answered No to the clock cap** (or the installer had no terminal to ask on, or you used
-`--no-sudo`), the GPU is not capped until you run this once, before you press **Start mining**:
+Prebuilt aarch64 binaries for DRIVE Thor (DRIVE OS, CUDA 12.8 native stack) are in the [Releases](https://github.com/isenlink/thor-pearl-miner/releases). Verify with `SHA256SUMS`, then:
 
 ```bash
-sudo ~/.local/share/spark-pearl-miner/install-clockcap.sh --apply
+# on the board (user nvidia)
+mkdir -p ~/prl-test && cd ~/prl-test
+# copy spark-pearl-miner, spark-pearl-gpu-worker, start.sh, config.toml here
+bash start.sh
+~/prl-test/spark-pearl-miner status
 ```
 
-The installer's summary, the last setup step and the dashboard show this command while the cap is
-missing. Lingering later: `sudo loginctl enable-linger $USER`. `--yes` answers both questions with
-yes.
+Acceptance checklist (all four must hold):
 
-- **It keeps running.** The service starts with your session (or at boot with lingering). It mines
-  only after the setup and **Start**; **Stop** is remembered across reboots.
-- **Update:** `~/.local/share/spark-pearl-miner/install.sh --upgrade` (settings are kept; if the new
-  version refuses your settings, the old one is put back). Go back:
-  `~/.local/share/spark-pearl-miner/install.sh --rollback`.
-- **Uninstall:** `~/.local/share/spark-pearl-miner/install.sh --uninstall` (add `--purge` to also
-  delete the settings, wallet and token).
-- **From source:** `git clone --recurse-submodules https://github.com/xXGuilasXx/spark-pearl-miner && cd spark-pearl-miner && ./packaging/install.sh --from-source`.
-- **Headless / remote:** `ssh -L 4078:127.0.0.1:4078 you@your-spark`, then open
-  http://127.0.0.1:4078/ on your computer.
+1. daemon log shows the known-answer line: `tiles=512 hits=13`
+2. `status` shows pool 1 active
+3. binary sha256 matches `SHA256SUMS`
+4. `tegrastats` GR3D starts at 0 % and rises only after mining starts
 
-Every installer option: `packaging/install.sh --help`.
+## Build from source (cross-compile on x86)
 
-## What you will see
-
-One page answers three questions: **is it working** (one sentence with a coloured dot and one
-Start/Stop button), **how much** (the credited rate and the accepted/rejected shares) and **is it
-safe** (GPU power, GPU and board temperatures, SM clock and the clock cap). One line under it shows
-which pool is in use and whether the backups are ready. The gear icon holds the only four settings
-you may want to change: wallet, worker name, language and the three pools. `spark-pearl-miner status`
-does the same from a terminal.
-
-The **[illustrated manual](docs/en/MANUAL.md)** explains every button, message and setting, with a
-picture of each screen.
-
-## Experimental GPU kernels (GEN5, opt-in)
-
-Beyond the default GB10 (`sm_121a`) kernel, the `cuda/gemm/gemm_umma.*` sources also carry an
-experimental 5th-generation kernel path (2-SM UMMA, `sm_110a`), developed and validated on DRIVE
-Thor hardware. These kernels are **compiled in only when the corresponding preprocessor macros are
-defined**, and all of them default to OFF: a plain `cargo build` (with no `SPM_NVCC_FLAGS`) produces
-exactly the upstream semantics and behaviour.
-
-The switches are injected through the standard `SPM_NVCC_FLAGS` build variable, e.g.:
+Full recipe: [docs/BUILD.md](docs/BUILD.md). Summary:
 
 ```bash
-# default build (all experimental kernels OFF):
-cargo build --release -p spm-gpu -p spark-pearl-miner
+rustup toolchain install 1.98.1 --profile minimal
+rustup target add --toolchain 1.98.1 aarch64-unknown-linux-gnu
+sudo apt install gcc-13-aarch64-linux-gnu g++-13-aarch64-linux-gnu
 
-# experimental: step2 unique-slot fold + D2/D3 wedge-prevention patches
-SPM_CUDA_ARCH=sm_110a SPM_NVCC_FLAGS="-DSPM_STEP2_UNIQ -DSPM_D2_SYNCWARP -DSPM_D3_RENDEZVOUS"   cargo build --release -p spm-gpu -p spark-pearl-miner
+export NVCC=~/bin/nvcc-aarch64-shim-cu12.sh        # see docs/BUILD.md
+export CUDA_HOME=~/cuda-aarch64-link-128           # aarch64 libcudart link dir
+export SPM_CUDA_ARCH=sm_101a                       # cu12.8; sm_110a needs cu13 nvcc
+export SPM_NVCC_FLAGS="--expt-relaxed-constexpr -DNDEBUG"
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+
+touch cuda/gemm cuda/common cuda/prep              # build.rs rerun trap, see BUILD.md
+cargo build --release --target aarch64-unknown-linux-gnu -p spm-gpu -p spark-pearl-miner
+touch crates/spm-worker/src/bin/spark-pearl-gpu-worker.rs
+cargo build --release --target aarch64-unknown-linux-gnu -p spm-worker
 ```
 
-| Macro | Effect |
-|---|---|
-| `SPM_STEP2_UNIQ` | Step2 unique-slot fold (credited-throughput improvement, verified +7% on test hardware) |
-| `SPM_D2_SYNCWARP` | D2 warp-synchronisation guard (wedge prevention) |
-| `SPM_D3_RENDEZVOUS` | D3 cluster rendezvous before TMEM free (wedge prevention) |
+## Operations
 
-Other `SPM_*` environment knobs (`SPM_CUDA_ARCH`, `SPM_GEN5_TMACS`, ...) behave as documented in
-`crates/spm-gpu/build.rs` and the source comments. The pure-Rust reference oracle for the separate
-`SPM_FOLD_EVERY=N` proposal lives in `crates/spm-cpuref` (tests pass with `cargo test -p spm-cpuref`);
-that proposal itself is frozen and NOT being pursued unilaterally.
+Runbook (status checks, start/stop, post-reset redeployment, kernel-test discipline, wedge symptoms and handling): [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
-## Developer fee (disclosed)
-`dev fee 2.00% → prl1pkqprrek7pemaxyvl4deusyz2hrkywnkhl86w7yqv53x0qyvsd5fs57s90n @ br.pearl.herominers.com:1200 (HeroMiners), worker "devfee", 120 s slices, only while mining`
-All fee constants live in one file, `crates/spm-fee/src/lib.rs`; CI fails if this README disagrees with it. **The fee wallet is not configurable**: there is no flag, environment variable, config key or API that can change it, and the GUI shows it read-only. Release tarballs ship with a SHA256SUMS file; reproducible, attested builds are planned but not in place yet. No remote configuration, no obfuscation, no packed binaries. The fee switches itself off when your wallet is the fee wallet.
+Two rules that matter most:
 
-## Donations
-If this project is useful to you, PRL donations are welcome at the same address:
+- **Never run kernel experiments while the miner is running** — concurrent TMEM users wedge the GPU (D-state processes, GR3D 99 %, `kill -9` ineffective). Stop the miner first, test serially in the foreground, verify zero residue afterwards.
+- **A wedged GPU does not recover from a soft reboot.** On DRIVE OS the reliable reset is `tegrareset x1` (MCU-level) — and it wipes the `/home` overlay, so keep a redeployment kit (binaries + config + start script) ready; see OPERATIONS.md §3.
 
-`prl1pkqprrek7pemaxyvl4deusyz2hrkywnkhl86w7yqv53x0qyvsd5fs57s90n`
+## Technical design
 
-## Pools
-The miner ships with three pools, in this order, and automatic failover between them:
-**Kryptex** (`prl-br.kryptex.network:8048`, TLS), **HeroMiners BR** (`br.pearl.herominers.com:1200`)
-and **LuckyPool BR** (`pearl-br.luckypool.io:3360`, pinned certificate). All three had accepted
-shares and 0 rejects in live tests. If the pool in use fails, the miner switches to the next one in
-about 1 s; it checks the preferred pool again every 5 minutes and returns to it once it has been
-stable for 60 s. The dashboard shows this as one status line. Change the pools with the gear icon (see
-`docs/en/CONFIGURATION.md` for every pool option). If you still have to pick one: I have mined PRL on **Kryptex** and never had a problem with its payouts. Signing up through my referral link costs you nothing and supports this project:
+[docs/GEN5-DESIGN.md](docs/GEN5-DESIGN.md): the pool's PoW semantics (transcript, fold, digest), how the gen4 kernel works, and how the GEN5 UMMA kernel reads hash tiles out of TMEM per K-slice.
 
-https://pool.kryptex.com/?ref=b2cfe3e2 (referral link)
+## Benchmarks
 
-## Safety
+[docs/BENCH-RESULTS.md](docs/BENCH-RESULTS.md): full tile/cluster/stage sweep on a 14-SM Thor board, wedge black-list (M=128 tiles in 2×1 clusters are unstable), MMA-unit ceiling measurements, and the theoretical-peak analysis.
 
-- **Power.** The GB10 has no software power limit and some units power off hard around 88–92 W of
-  GPU draw. The default **Balanced** profile targets 75 W and stops at 85 W, with the 2000 MHz clock
-  cap (measured about 67 W). A governor reads the GPU 10 times per second and pauses mining when the
-  GPU passes 83 °C, the board passes 95 °C, or the power stays above the stop for 3 readings (60 s
-  pause). Without power readings it does not mine. The Max profile (2200 MHz) measured 83–87 W and a
-  97.5 °C board, so it exists only in the settings file behind an explicit acknowledgement and is
-  not recommended. Details: [POWER-THERMAL](docs/en/POWER-THERMAL.md).
-- **Memory.** The GPU worker uses at most 2 GiB. It starts only with 22 GiB free and frees the GPU at
-  once below 16 GiB or under memory pressure, so your other programs come first.
-- **Shares.** Every share is verified on the Spark with the official Pearl reference code before it
-  is sent.
-- **Access.** The GUI listens on 127.0.0.1 only. Your own user needs no password; other accounts and
-  remote users need the token (`spark-pearl-miner gui --print-url`); LAN exposure is refused.
+## Relationship to upstream
 
-## Settings file
-
-Everything not in the GUI lives in one file, `~/.config/spark-pearl-miner/config.toml`, already
-tuned for the Spark and commented. Edit it only if you know why: the miner applies valid edits
-within seconds, ignores invalid ones (the dashboard shows an alert), and
-`spark-pearl-miner config check` tells you what is wrong. Every key:
-[CONFIGURATION](docs/en/CONFIGURATION.md).
-
-## FAQ
-
-**Does it slow down my AI work?** By default the GPU is the miner's while it mines: press **Stop**
-(the GPU is freed at once) before you run a model, **Start** afterwards. To have it step aside by
-itself while vLLM is busy, set `coexistence.mode = "yield"` in the settings file
-([COEXISTENCE](docs/en/COEXISTENCE.md)). In every mode it frees the GPU when memory runs low.
-
-**What if the pool is down?** It switches to the next pool in about 1 s and comes back when the
-first one has been healthy for 60 s (it is checked every 5 minutes). If all three are down it keeps retrying and the dashboard says so.
-
-**How do I stop, update or uninstall?** Stop: the button on the dashboard, or
-`spark-pearl-miner stop`. Update, rollback and uninstall: see [Install](#install).
-
-**Where is the configuration? Where are the logs?** `~/.config/spark-pearl-miner/config.toml`
-(`spark-pearl-miner config path`). Logs: `journalctl --user -u spark-pearl-miner -f`, or **Export
-diagnostics** in the dashboard footer.
-
-**Do I need root?** Only for the two optional steps: the clock cap and lingering.
-
-**Why does the rate move in steps?** The pool credits whole attempts of 7.04e13 MACs.
-
-**Can I change the fee or the fee wallet?** No. It is compiled in and shown read-only.
-
-**How do I pause or pin a pool?** From the command line or the API; see the
-[manual](docs/en/MANUAL.md#cli).
-
-**Is this financial advice?** No. Mining income is taxable in many countries (in Brazil, IN RFB
-2291/2025).
-
-## Requirements
-
-An NVIDIA DGX Spark (GB10) with DGX OS 7.x (driver ≥ 580 and the CUDA 13 runtime, both
-preinstalled) and a Pearl wallet address (`prl1p…`) that you control. Rust is needed only to build
-from source (pinned 1.98.1, installed automatically by the installer).
-
-## Documentation
-
-For users: [Manual (illustrated)](docs/en/MANUAL.md) · [Configuration](docs/en/CONFIGURATION.md) ·
-[Power and thermal](docs/en/POWER-THERMAL.md) · [Coexistence with an LLM server](docs/en/COEXISTENCE.md) ·
-[Viability](docs/en/VIABILITY.md)
-
-## Development
-
-[Architecture](docs/en/ARCHITECTURE.md) · [Kernel contract](docs/en/KERNEL.md) ·
-[Benchmarks](docs/en/BENCHMARKS.md) · [Pool protocols](docs/protocol/) ·
-[Decisions](docs/en/DECISIONS.md) · [Dual mining verdict](docs/en/DUAL-MINING.md) ·
-[API and security reference](docs/en/GUI.md) · [TODO](TODO.md) · [Contributing](CONTRIBUTING.md)
-
-The screenshots are regenerated with `tools/screenshots.sh`; the installer is tested with
-`tools/test-install.sh`, and release tarballs are built with `packaging/make-release.sh`.
-The [release guide](docs/en/RELEASING.md) describes version bumps, CI validation and automated publication.
+- Upstream: `xXGuilasXx/spark-pearl-miner` — the canonical project, built for DGX Spark.
+- This fork: `isenlink/thor-pearl-miner` — the DRIVE Thor distribution point. The same commits are proposed upstream via PR [xXGuilasXx/spark-pearl-miner#5](https://github.com/xXGuilasXx/spark-pearl-miner/pull/5); once merged, this repo tracks upstream + Thor-specific docs.
+- Fee logic, pool list, and default mining behaviour are unchanged from upstream. The 2 % developer fee goes to the upstream project's wallet (protocol-fixed, not configurable).
 
 ## License
-Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE) (ISC: Pearl Research Labs and The Decred developers; BSD-3: NVIDIA CUTLASS).
+
+Apache-2.0, same as upstream.
